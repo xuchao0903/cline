@@ -62,7 +62,13 @@ const TaskHeader: React.FC<TaskHeaderProps> = ({
 	const [isTextOverflowing, setIsTextOverflowing] = useState(false)
 	const highlightedTextRef = React.useRef<HTMLDivElement>(null)
 
-	const highlightedText = useMemo(() => highlightText(task.text, false), [task.text])
+	// The header shows the conversation title alone. The title is stored on the
+	// history item (rename rewrites it), while the task message still carries the
+	// original prompt. Rendering the prompt underneath as well made a renamed
+	// conversation read as a new name stacked on top of the stale one, instead of
+	// as a replacement.
+	const taskTitle = currentTaskItem?.task?.trim() || task.text
+	const highlightedTitle = useMemo(() => highlightText(taskTitle, false), [taskTitle])
 
 	// Check if text overflows the container (i.e., needs clamping)
 	useLayoutEffect(() => {
@@ -71,7 +77,7 @@ const TaskHeader: React.FC<TaskHeaderProps> = ({
 			// Check if content height exceeds the max-height
 			setIsTextOverflowing(el.scrollHeight > el.clientHeight)
 		}
-	}, [task.text, isTaskExpanded, isHighlightedTextExpanded])
+	}, [taskTitle, isTaskExpanded, isHighlightedTextExpanded])
 
 	// Handle click outside to collapse
 	React.useEffect(() => {
@@ -165,7 +171,7 @@ const TaskHeader: React.FC<TaskHeaderProps> = ({
 					<div className="flex items-center select-none grow min-w-0 gap-1 justify-between">
 						{!isTaskExpanded && (
 							<div className="whitespace-nowrap overflow-hidden text-ellipsis grow min-w-0">
-								<span className="ph-no-capture text-base">{highlightedText}</span>
+								<span className="ph-no-capture text-base">{highlightedTitle}</span>
 							</div>
 						)}
 					</div>
@@ -208,7 +214,7 @@ const TaskHeader: React.FC<TaskHeaderProps> = ({
 										}
 									: undefined
 							}>
-							{highlightedText}
+							{highlightedTitle}
 						</div>
 
 						{((task.images && task.images.length > 0) || (task.files && task.files.length > 0)) && (

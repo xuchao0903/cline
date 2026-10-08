@@ -1,8 +1,11 @@
 import { StringRequest } from "@shared/proto/cline/common"
-import { memo } from "react"
+import { type MouseEvent, memo } from "react"
 import { useExtensionState } from "@/context/ExtensionStateContext"
 import { useUsageCostVisibility } from "@/hooks/useUsageCostVisibility"
 import { TaskServiceClient } from "@/services/grpc-client"
+import HistoryItemMenu from "./HistoryItemMenu"
+import HistoryTitleInput from "./HistoryTitleInput"
+import { useHistoryItemActions } from "./useHistoryItemActions"
 
 type HistoryPreviewProps = {
 	showHistoryView: () => void
@@ -11,10 +14,18 @@ type HistoryPreviewProps = {
 const HistoryPreview = ({ showHistoryView }: HistoryPreviewProps) => {
 	const { taskHistory } = useExtensionState()
 	const isCostVisible = useUsageCostVisibility()
+	// Rename state is shared with the full history view; the preview reads
+	// taskHistory straight from extension state, which the host refreshes.
+	const { menu, renamingTaskId, openMenu, dismissMenu, beginRename, commitRename, cancelRename } = useHistoryItemActions()
+
 	const handleHistorySelect = (id: string) => {
 		TaskServiceClient.showTaskWithId(StringRequest.create({ value: id })).catch((error) =>
 			console.error("Error showing task:", error),
 		)
+	}
+
+	const handleOpenMenu = (event: MouseEvent, taskId: string) => {
+		openMenu(event, taskId)
 	}
 
 	const formatDate = (timestamp: number) => {
@@ -27,6 +38,7 @@ const HistoryPreview = ({ showHistoryView }: HistoryPreviewProps) => {
 
 	return (
 		<div style={{ flexShrink: 0 }}>
+			{menu && <HistoryItemMenu onDismiss={dismissMenu} onRename={beginRename} position={{ x: menu.x, y: menu.y }} />}
 			<style>
 				{`
 					.history-preview-item {
@@ -150,7 +162,11 @@ const HistoryPreview = ({ showHistoryView }: HistoryPreviewProps) => {
 							.filter((item) => item.ts && item.task)
 							.slice(0, 3)
 							.map((item) => (
-								<div className="history-preview-item" key={item.id} onClick={() => handleHistorySelect(item.id)}>
+								<div
+									className="history-preview-item"
+									key={item.id}
+									onClick={() => handleHistorySelect(item.id)}
+									onContextMenu={(event) => handleOpenMenu(event, item.id)}>
 									<div className="history-task-content">
 										{item.isFavorited && (
 											<span
@@ -162,7 +178,16 @@ const HistoryPreview = ({ showHistoryView }: HistoryPreviewProps) => {
 												}}
 											/>
 										)}
-										<div className="history-task-description ph-no-capture">{item.task}</div>
+										{renamingTaskId === item.id ? (
+											<HistoryTitleInput
+												className="flex-1 min-w-0 rounded-xs border border-input-border bg-input-background px-1 py-0.5 text-xs text-input-foreground outline-none focus:border-button-background"
+												onCancel={cancelRename}
+												onCommit={commitRename}
+												value={item.task}
+											/>
+										) : (
+											<div className="history-task-description ph-no-capture">{item.task}</div>
+										)}
 										{item.isLegacy && <span className="history-cost-chip">Legacy</span>}
 									</div>
 									<div className="history-meta-stack">

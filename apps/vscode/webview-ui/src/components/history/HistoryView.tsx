@@ -11,7 +11,9 @@ import { useExtensionState } from "@/context/ExtensionStateContext"
 import { TaskServiceClient } from "@/services/grpc-client"
 import { formatSize } from "@/utils/format"
 import ViewHeader from "../common/ViewHeader"
+import HistoryItemMenu from "./HistoryItemMenu"
 import HistoryViewItem from "./HistoryViewItem"
+import { useHistoryItemActions } from "./useHistoryItemActions"
 
 type HistoryViewProps = {
 	onDone: () => void
@@ -173,6 +175,14 @@ const HistoryView = ({ onDone }: HistoryViewProps) => {
 		},
 		[showFavoritesOnly, showCurrentWorkspaceOnly, loadTaskHistory],
 	)
+
+	// Rename state lives in a hook shared with the welcome preview; the list
+	// reloads on success so the row text settles.
+	const { menu, renamingTaskId, openMenu, dismissMenu, beginRename, commitRename, cancelRename } = useHistoryItemActions({
+		onRenamed: () => {
+			void loadTaskHistory(0)
+		},
+	})
 
 	// Use the onRelinquishControl hook instead of message event
 	useEffect(() => {
@@ -380,6 +390,7 @@ const HistoryView = ({ onDone }: HistoryViewProps) => {
 
 	return (
 		<div className="fixed overflow-hidden inset-0 flex flex-col w-full">
+			{menu && <HistoryItemMenu onDismiss={dismissMenu} onRename={beginRename} position={{ x: menu.x, y: menu.y }} />}
 			{/* HEADER */}
 			<ViewHeader environment={environment} onDone={onDone} title="History" />
 
@@ -505,7 +516,11 @@ const HistoryView = ({ onDone }: HistoryViewProps) => {
 								handleDeleteHistoryItem={handleDeleteHistoryItem}
 								handleHistorySelect={handleHistorySelect}
 								index={index}
+								isRenaming={renamingTaskId === item.id}
 								item={item}
+								onCancelRename={cancelRename}
+								onCommitRename={commitRename}
+								onOpenMenu={openMenu}
 								pendingFavoriteToggles={pendingFavoriteToggles}
 								selectedItems={selectedItems}
 								toggleFavorite={toggleFavorite}

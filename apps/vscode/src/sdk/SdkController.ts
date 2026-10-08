@@ -2292,6 +2292,25 @@ export class Controller {
 		await this.postStateToWebview()
 	}
 
+	async renameTask(taskId: string, title: string): Promise<void> {
+		const nextTitle = title.trim()
+		if (!nextTitle) {
+			throw new Error("Task title cannot be empty")
+		}
+
+		const historyItem = await this.taskHistory.findHistoryItem(taskId)
+		if (!historyItem) {
+			Logger.log(`[renameTask] Task not found in history: ${taskId}`)
+			throw new Error(`Task not found in history: ${taskId}`)
+		}
+
+		await this.taskHistory.updateTaskHistory({
+			...historyItem,
+			task: nextTitle,
+		})
+		await this.postStateToWebview()
+	}
+
 	// ---- Background command state ----
 
 	updateBackgroundCommandState(running: boolean, taskId?: string): void {
