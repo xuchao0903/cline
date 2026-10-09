@@ -25,8 +25,13 @@ vi.mock("@/hosts/host-provider", () => ({
 	},
 }))
 
+const fsMock = vi.hoisted(() => ({
+	isDirectory: vi.fn(async (_path: string) => true),
+}))
+
 vi.mock("@/utils/fs", () => ({
 	fileExistsAtPath: vi.fn(() => Promise.resolve(false)),
+	isDirectory: fsMock.isDirectory,
 }))
 
 const legacyStateReaderMock = vi.hoisted(() => ({
@@ -86,6 +91,7 @@ describe("SdkTaskHistory", () => {
 		legacyStateReaderMock.apiConversationHistory = []
 		legacyStateReaderMock.apiConversationHistoryByDataDir.clear()
 		vi.clearAllMocks()
+		fsMock.isDirectory.mockResolvedValue(true)
 		vi.mocked(getFolderSize.loose).mockReset()
 	})
 
@@ -878,6 +884,54 @@ describe("SdkTaskHistory", () => {
 		const record = result.find((r) => r.sessionId === "task-1")
 		expect(record?.prompt).toBe("original")
 		expect(record?.updatedAt).toBe("2026-01-01T00:00:00.000Z")
+	})
+
+	it("moves a conversation to another project without rewriting the cwd it ran in", async () => {
+		const { history, updateSession } = makeHistory([makeSessionRecord("task-1", { cwd: "/repo/a" })])
+
+		await history.moveTaskToProject("task-1", "/repo/b")
+
+		// Only metadata is written: the recorded cwd stays put so the move is reversible.
+		expect(updateSession).toHaveBeenCalledWith("task-1", { metadata: { clineProjectPath: "/repo/b" } })
+		const item = await history.findHistoryItem("task-1")
+		expect(item?.cwdOnTaskInitialization).toBe("/repo/b")
+	})
+
+	it("keeps a moved conversation's other metadata, including its title", async () => {
+		const { history, updateSession } = makeHistory([
+			makeSessionRecord("task-1", { cwd: "/repo/a", metadata: { title: "Ship it", isFavorited: true } }),
+		])
+
+		await history.moveTaskToProject("task-1", "/repo/b")
+
+		expect(updateSession).toHaveBeenCalledWith("task-1", {
+			metadata: { title: "Ship it", isFavorited: true, clineProjectPath: "/repo/b" },
+		})
+	})
+
+	it("refuses to move a conversation to a folder that does not exist", async () => {
+		const { history, updateSession } = makeHistory([makeSessionRecord("task-1")])
+		fsMock.isDirectory.mockResolvedValue(false)
+
+		await expect(history.moveTaskToProject("task-1", "/repo/missing")).rejects.toThrow(/does not exist/)
+		expect(updateSession).not.toHaveBeenCalled()
+	})
+
+	it("reports a move to a conversation that is no longer in history", async () => {
+		const { history, updateSession } = makeHistory([])
+
+		await expect(history.moveTaskToProject("gone", "/repo/b")).rejects.toThrow(/Task not found/)
+		expect(updateSession).not.toHaveBeenCalled()
+	})
+
+	it("skips the write when the conversation is already filed under that project", async () => {
+		const { history, updateSession } = makeHistory([makeSessionRecord("task-1", { cwd: "/repo/b" })])
+
+		await history.moveTaskToProject("task-1", "/repo/b")
+
+		// No write means no updatedAt bump, so the conversation keeps its
+		// position in the recency ordering.
+		expect(updateSession).not.toHaveBeenCalled()
 	})
 })
 
