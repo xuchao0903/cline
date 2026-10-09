@@ -12,12 +12,14 @@ import {
 	StarIcon,
 	TrashIcon,
 } from "lucide-react"
-import { memo, useCallback, useMemo, useState } from "react"
+import { type MouseEvent, memo, useCallback, useMemo, useState } from "react"
 import { Button } from "@/components/ui/button"
 import { useUsageCostVisibility } from "@/hooks/useUsageCostVisibility"
 import { cn } from "@/lib/utils"
 import { TaskServiceClient } from "@/services/grpc-client"
 import { formatLargeNumber, formatSize } from "@/utils/format"
+import { startHistoryTaskDrag } from "./HistoryItemMenu"
+import HistoryTitleInput from "./HistoryTitleInput"
 
 type HistoryViewItemProps = {
 	item: HistoryItem
@@ -27,6 +29,14 @@ type HistoryViewItemProps = {
 	handleDeleteHistoryItem: (id: string) => void
 	toggleFavorite: (id: string, isCurrentlyFavorited: boolean) => void
 	handleHistorySelect: (itemId: string, checked: boolean) => void
+	/** Opens the rename/move menu for this conversation. */
+	onOpenMenu: (event: MouseEvent, taskId: string, projectPath?: string) => void
+	/** True while this conversation's title is being edited in place. */
+	isRenaming: boolean
+	onCommitRename: (title: string) => void
+	onCancelRename: () => void
+	/** False when conversations are not grouped, so there is nowhere to drop them. */
+	canDragToProject: boolean
 }
 
 const HistoryViewItem = ({
@@ -36,6 +46,11 @@ const HistoryViewItem = ({
 	toggleFavorite,
 	handleHistorySelect,
 	selectedItems,
+	onOpenMenu,
+	isRenaming,
+	onCommitRename,
+	onCancelRename,
+	canDragToProject,
 }: HistoryViewItemProps) => {
 	const [expanded, setExpanded] = useState(false)
 	const isCostVisible = useUsageCostVisibility()
@@ -78,7 +93,12 @@ const HistoryViewItem = ({
 	}, [])
 
 	return (
-		<div className="history-item cursor-pointer flex group mb-1 hover:bg-list-hover border-b border-accent/10" key={item.id}>
+		<div
+			className="history-item cursor-pointer flex group mb-1 hover:bg-list-hover border-b border-accent/10"
+			draggable={canDragToProject && !isRenaming}
+			key={item.id}
+			onContextMenu={(event) => onOpenMenu(event, item.id, item.cwdOnTaskInitialization)}
+			onDragStart={(event) => startHistoryTaskDrag(event, item.id)}>
 			<VSCodeCheckbox
 				checked={selectedItems.includes(item.id)}
 				className="pl-3 pr-1 py-auto self-start mt-3"
@@ -97,9 +117,18 @@ const HistoryViewItem = ({
 					handleShowTaskWithId(item.id)
 				}}>
 				<div className="flex items-center gap-2">
-					<div className="line-clamp-1 overflow-hidden break-words whitespace-pre-wrap flex-1 min-w-0">
-						<span className="ph-no-capture">{item.task}</span>
-					</div>
+					{isRenaming ? (
+						<HistoryTitleInput
+							className="line-clamp-1 flex-1 min-w-0"
+							onCancel={onCancelRename}
+							onCommit={onCommitRename}
+							value={item.task}
+						/>
+					) : (
+						<div className="line-clamp-1 overflow-hidden break-words whitespace-pre-wrap flex-1 min-w-0">
+							<span className="ph-no-capture">{item.task}</span>
+						</div>
+					)}
 					{item.isLegacy && (
 						<span className="text-xs uppercase rounded px-1.5 py-0.5 bg-accent/20 text-description flex-shrink-0">
 							Legacy

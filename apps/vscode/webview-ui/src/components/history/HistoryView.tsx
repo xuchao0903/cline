@@ -8,10 +8,15 @@ import { GroupedVirtuoso } from "react-virtuoso"
 import { Button } from "@/components/ui/button"
 import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select"
 import { useExtensionState } from "@/context/ExtensionStateContext"
+import { cn } from "@/lib/utils"
 import { TaskServiceClient } from "@/services/grpc-client"
 import { formatSize } from "@/utils/format"
 import ViewHeader from "../common/ViewHeader"
+import HistoryItemMenu, { readDraggedTaskId } from "./HistoryItemMenu"
 import HistoryViewItem from "./HistoryViewItem"
+import { collectProjectTargets } from "./projectGroups"
+import { clearRetainedProjects, forgetRetainedProject, getRetainedProjects } from "./retainedProjects"
+import { useHistoryItemActions } from "./useHistoryItemActions"
 
 type HistoryViewProps = {
 	onDone: () => void
@@ -33,13 +38,21 @@ const HISTORY_FILTERS = {
 	mostRelevant: "Most Relevant",
 	workspaceOnly: "Workspace Only",
 	favoritesOnly: "Favorites Only",
+	groupByProject: "Group by Project",
+}
+
+type HistoryGroupLabel = {
+	label: string
+	title?: string
+	/** Raw project path, absent for the unknown-project group (not a drop target). */
+	projectPath?: string
 }
 
 const HISTORY_PAGE_SIZE = 50
 
 const HistoryView = ({ onDone }: HistoryViewProps) => {
 	const extensionStateContext = useExtensionState()
-	const { taskHistory, onRelinquishControl, environment } = extensionStateContext
+	const { taskHistory, onRelinquishControl, environment, workspaceRoots, platform } = extensionStateContext
 	const [searchQuery, setSearchQuery] = useState("")
 	const [sortOption, setSortOption] = useState<SortOption>("newest")
 	const [lastNonRelevantSort, setLastNonRelevantSort] = useState<SortOption | null>("newest")
@@ -47,6 +60,13 @@ const HistoryView = ({ onDone }: HistoryViewProps) => {
 	const [selectedItems, setSelectedItems] = useState<string[]>([])
 	const [showFavoritesOnly, setShowFavoritesOnly] = useState(false)
 	const [showCurrentWorkspaceOnly, setShowCurrentWorkspaceOnly] = useState(false)
+	const [groupByProject, setGroupByProject] = useState<boolean>(() => {
+		try {
+			return window.localStorage.getItem("cline.historyGroupByProject") !== "false"
+		} catch {
+			return true
+		}
+	})
 
 	// Keep track of pending favorite toggle operations
 	const [pendingFavoriteToggles, setPendingFavoriteToggles] = useState<Record<string, boolean>>({})
@@ -174,6 +194,19 @@ const HistoryView = ({ onDone }: HistoryViewProps) => {
 		[showFavoritesOnly, showCurrentWorkspaceOnly, loadTaskHistory],
 	)
 
+	// Rename/move state lives in a hook shared with the welcome preview; the
+	// list reloads on success so the row text and its project group both settle.
+	const { menu, renamingTaskId, openMenu, dismissMenu, beginRename, commitRename, cancelRename, moveToProject } =
+		useHistoryItemActions({
+			onRenamed: () => {
+				void loadTaskHistory(0)
+			},
+			onMoved: () => {
+				void loadTaskHistory(0)
+			},
+		})
+	const [dropTargetPath, setDropTargetPath] = useState<string | null>(null)
+
 	// Use the onRelinquishControl hook instead of message event
 	useEffect(() => {
 		return onRelinquishControl(() => {
@@ -260,6 +293,8 @@ const HistoryView = ({ onDone }: HistoryViewProps) => {
 		setDeleteAllDisabled(true)
 		TaskServiceClient.deleteAllTaskHistory(EmptyRequest.create({}))
 			.then(async () => {
+				// The whole history is gone, so no project keeps a pinned group.
+				clearRetainedProjects()
 				await loadTaskHistory(0)
 				setSelectedItems([])
 				await fetchTotalTasksSize()
@@ -319,8 +354,66 @@ const HistoryView = ({ onDone }: HistoryViewProps) => {
 		return results
 	}, [tasks, searchQuery, fuse, sortOption])
 
-	// Group tasks into "Today" and "Older" (only for date-based sorts)
+	// Group tasks by project (default), or into "Today"/"Older" for date-based sorts
 	const { groupedTasks, groupCounts, groupLabels } = useMemo(() => {
+		if (groupByProject) {
+			const projectGroups = new Map<string, { tasks: any[]; label: string; title: string; newestTs: number }>()
+
+			taskHistorySearchResults.forEach((task) => {
+				const rawRoot = task.workspaceRoot || ""
+				const rootKey = rawRoot.replace(/\\/g, "/").replace(/\/+$/, "")
+				let group = projectGroups.get(rootKey)
+				if (!group) {
+					const segments = rootKey.split("/").filter(Boolean)
+					group = {
+						tasks: [],
+						label: segments.length > 0 ? segments[segments.length - 1] : "Unknown Project",
+						title: rootKey,
+						newestTs: 0,
+					}
+					projectGroups.set(rootKey, group)
+				}
+				group.tasks.push(task)
+				group.newestTs = Math.max(group.newestTs, task.ts)
+			})
+
+			// Projects whose conversations were all moved away keep an empty
+			// group so the header (and its drop target) survives; hidden while
+			// a search or filter narrows the list to actual matches.
+			if (!searchQuery && !showFavoritesOnly && !showCurrentWorkspaceOnly) {
+				for (const retainedPath of getRetainedProjects()) {
+					const retainedKey = retainedPath.replace(/\\/g, "/").replace(/\/+$/, "")
+					if (!retainedKey || projectGroups.has(retainedKey)) {
+						continue
+					}
+					const segments = retainedKey.split("/").filter(Boolean)
+					projectGroups.set(retainedKey, {
+						tasks: [],
+						label: segments[segments.length - 1] ?? "Unknown Project",
+						title: retainedKey,
+						newestTs: 0,
+					})
+				}
+			}
+
+			// Sort project groups by most recent activity so the active project appears first
+			const groups = Array.from(projectGroups.values()).sort((a, b) => b.newestTs - a.newestTs)
+
+			return {
+				groupedTasks: groups.flatMap((g) => g.tasks),
+				groupCounts: groups.map((g) => g.tasks.length),
+				// The unknown-project group has no path, so it is neither a drop
+				// target nor listed as a project a conversation can move to.
+				groupLabels: groups.map(
+					(g): HistoryGroupLabel => ({
+						label: g.label,
+						title: g.title,
+						projectPath: g.title === "" ? undefined : g.title,
+					}),
+				),
+			}
+		}
+
 		const isDateSort = sortOption === "newest" || sortOption === "oldest"
 
 		if (!isDateSort) {
@@ -328,7 +421,7 @@ const HistoryView = ({ onDone }: HistoryViewProps) => {
 			return {
 				groupedTasks: taskHistorySearchResults,
 				groupCounts: [taskHistorySearchResults.length],
-				groupLabels: [] as string[],
+				groupLabels: [] as HistoryGroupLabel[],
 			}
 		}
 
@@ -354,9 +447,35 @@ const HistoryView = ({ onDone }: HistoryViewProps) => {
 		return {
 			groupedTasks: groups.flatMap((g) => g.tasks),
 			groupCounts: groups.map((g) => g.tasks.length),
-			groupLabels: groups.map((g) => g.label),
+			groupLabels: groups.map((g): HistoryGroupLabel => ({ label: g.label })),
 		}
-	}, [taskHistorySearchResults, sortOption])
+	}, [taskHistorySearchResults, sortOption, groupByProject, searchQuery, showFavoritesOnly, showCurrentWorkspaceOnly])
+
+	// A retained project that holds conversations again stops being pinned.
+	useEffect(() => {
+		if (!groupByProject) {
+			return
+		}
+		groupLabels.forEach((group, index) => {
+			if (group.projectPath && (groupCounts[index] ?? 0) > 0) {
+				forgetRetainedProject(group.projectPath)
+			}
+		})
+	}, [groupByProject, groupLabels, groupCounts])
+
+	// Projects offered by the right-click menu. The history entries are included
+	// so a project keeps a move target even when its last conversation is gone;
+	// retained projects likewise stay reachable as move targets.
+	const projectTargets = useMemo(
+		() =>
+			collectProjectTargets({
+				workspaceRoots,
+				historyPaths: [...taskHistorySearchResults.map((task) => task.workspaceRoot), ...getRetainedProjects()],
+				currentProjectPath: menu?.projectPath,
+				platform,
+			}),
+		[workspaceRoots, taskHistorySearchResults, menu?.projectPath, platform],
+	)
 
 	// Calculate total size of selected items
 	const selectedItemsSize = useMemo(() => {
@@ -380,6 +499,20 @@ const HistoryView = ({ onDone }: HistoryViewProps) => {
 
 	return (
 		<div className="fixed overflow-hidden inset-0 flex flex-col w-full">
+			{menu && (
+				<HistoryItemMenu
+					currentProjectPath={menu.projectPath}
+					onDismiss={dismissMenu}
+					onMoveToProject={(projectPath) => {
+						const sourceProjectPath = tasks.find((task) => task.id === menu.taskId)?.workspaceRoot
+						void moveToProject(menu.taskId, projectPath, sourceProjectPath)
+					}}
+					onRename={beginRename}
+					platform={platform}
+					position={{ x: menu.x, y: menu.y }}
+					projects={projectTargets}
+				/>
+			)}
 			{/* HEADER */}
 			<ViewHeader environment={environment} onDone={onDone} title="History" />
 
@@ -434,6 +567,16 @@ const HistoryView = ({ onDone }: HistoryViewProps) => {
 								setShowCurrentWorkspaceOnly(!showCurrentWorkspaceOnly)
 							} else if (value === "favoritesOnly") {
 								setShowFavoritesOnly(!showFavoritesOnly)
+							} else if (value === "groupByProject") {
+								setGroupByProject((previous) => {
+									const next = !previous
+									try {
+										window.localStorage.setItem("cline.historyGroupByProject", String(next))
+									} catch {
+										// localStorage unavailable - keep session-only state
+									}
+									return next
+								})
 							}
 						}}
 						value={sortOption}>
@@ -445,14 +588,16 @@ const HistoryView = ({ onDone }: HistoryViewProps) => {
 								const isSortOption = ["newest", "oldest", "mostExpensive", "mostTokens", "mostRelevant"].includes(
 									key,
 								)
-								const isFilterOption = ["workspaceOnly", "favoritesOnly"].includes(key)
+								const isFilterOption = ["workspaceOnly", "favoritesOnly", "groupByProject"].includes(key)
 								const isSelected = isSortOption
 									? sortOption === key
 									: key === "workspaceOnly"
 										? showCurrentWorkspaceOnly
 										: key === "favoritesOnly"
 											? showFavoritesOnly
-											: false
+											: key === "groupByProject"
+												? groupByProject
+												: false
 								const isDisabled = key === "mostRelevant" && !searchQuery
 
 								return (
@@ -465,7 +610,11 @@ const HistoryView = ({ onDone }: HistoryViewProps) => {
 											{isFilterOption && (
 												<span
 													className={`codicon ${
-														key === "workspaceOnly" ? "codicon-folder" : "codicon-star-full"
+														key === "workspaceOnly"
+															? "codicon-folder"
+															: key === "groupByProject"
+																? "codicon-root-folder"
+																: "codicon-star-full"
 													} ${isSelected ? "text-button-background" : ""}`}
 												/>
 											)}
@@ -492,20 +641,56 @@ const HistoryView = ({ onDone }: HistoryViewProps) => {
 							) : null,
 					}}
 					endReached={loadMoreTaskHistory}
-					groupContent={(index) => (
-						<div className="px-4 py-2 text-xs font-bold uppercase tracking-wide sticky top-0 z-10 text-description bg-sidebar-background border-b-border-panel">
-							{groupLabels[index]}
-						</div>
-					)}
+					groupContent={(index) => {
+						const group = groupLabels[index]
+						// The unknown-project group has no folder to file a conversation under.
+						const projectPath = group?.projectPath
+						const isDropTarget = Boolean(projectPath) && dropTargetPath === projectPath
+						return (
+							<div
+								className={cn(
+									"px-4 py-2 text-xs font-bold uppercase tracking-wide sticky top-0 z-10 text-description bg-sidebar-background border-b-border-panel",
+									isDropTarget && "bg-button-background/20 text-button-foreground",
+								)}
+								onDragLeave={() => setDropTargetPath(null)}
+								onDragOver={(event) => {
+									if (!projectPath || !readDraggedTaskId(event)) {
+										return
+									}
+									// Without preventDefault the browser refuses the drop.
+									event.preventDefault()
+									event.dataTransfer.dropEffect = "move"
+									setDropTargetPath(projectPath)
+								}}
+								onDrop={(event) => {
+									const taskId = readDraggedTaskId(event)
+									setDropTargetPath(null)
+									if (!projectPath || !taskId) {
+										return
+									}
+									event.preventDefault()
+									const sourceProjectPath = tasks.find((task) => task.id === taskId)?.workspaceRoot
+									void moveToProject(taskId, projectPath, sourceProjectPath)
+								}}
+								title={group?.title}>
+								{group?.label}
+							</div>
+						)
+					}}
 					groupCounts={groupCounts}
 					itemContent={(index) => {
 						const item = groupedTasks[index]
 						return (
 							<HistoryViewItem
+								canDragToProject={groupByProject}
 								handleDeleteHistoryItem={handleDeleteHistoryItem}
 								handleHistorySelect={handleHistorySelect}
 								index={index}
+								isRenaming={renamingTaskId === item.id}
 								item={item}
+								onCancelRename={cancelRename}
+								onCommitRename={commitRename}
+								onOpenMenu={(event, taskId) => openMenu(event, taskId, item.workspaceRoot)}
 								pendingFavoriteToggles={pendingFavoriteToggles}
 								selectedItems={selectedItems}
 								toggleFavorite={toggleFavorite}
