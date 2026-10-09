@@ -102,6 +102,7 @@ import {
 	type SdkUserMessage,
 } from "./sdk-user-message-mapping"
 import { readCurrentMessages } from "./session-host"
+import { resolveSessionProjectPath } from "./session-project"
 import { buildDisabledWorkflowNames, expandSlashCommands } from "./slash-command-expansion"
 import { StatePostDebouncer } from "./state-post-debouncer"
 import { createTaskProxy, type TaskProxy } from "./task-proxy"
@@ -2082,7 +2083,7 @@ export class Controller {
 		const { favoritesOnly, currentWorkspaceOnly, searchQuery, sortBy } = request
 		const limit = request.limit > 0 ? Math.min(request.limit, 100) : 50
 		const offset = request.offset > 0 ? request.offset : 0
-		const workspacePath = currentWorkspaceOnly ? await this.getWorkspaceRoot() : undefined
+		const workspacePath = await this.getWorkspaceRoot()
 		const sessionHistory = await this.taskHistory.listHistory({
 			hydrate: false,
 			limit: limit + 1,
@@ -2104,7 +2105,7 @@ export class Controller {
 			}
 
 			if (currentWorkspaceOnly && workspacePath) {
-				const sessionWorkspacePath = item.cwd ?? item.workspaceRoot
+				const sessionWorkspacePath = resolveSessionProjectPath(item)
 				if (!sessionWorkspacePath || !arePathsEqual(sessionWorkspacePath, workspacePath)) {
 					return false
 				}
@@ -2165,6 +2166,7 @@ export class Controller {
 				cacheReads: metadataNumber(metadata, "cacheReads") ?? 0,
 				modelId: item.model || metadataString(metadata, "modelId") || "",
 				apiProvider: item.provider ?? "",
+				workspaceRoot: resolveSessionProjectPath(item),
 				isLegacy:
 					metadataBoolean(metadata, "legacyTask") === true ||
 					metadataBoolean(metadata, "migratedFromLegacyTask") === true,
@@ -2190,6 +2192,7 @@ export class Controller {
 					cacheReads: 0,
 					modelId: this.task.api?.getModel?.().id ?? "",
 					apiProvider: "",
+					workspaceRoot: workspacePath,
 					isLegacy: false,
 				})
 			}
@@ -2289,6 +2292,30 @@ export class Controller {
 			...historyItem,
 			isFavorited,
 		})
+		await this.postStateToWebview()
+	}
+
+	async renameTask(taskId: string, title: string): Promise<void> {
+		const nextTitle = title.trim()
+		if (!nextTitle) {
+			throw new Error("Task title cannot be empty")
+		}
+
+		const historyItem = await this.taskHistory.findHistoryItem(taskId)
+		if (!historyItem) {
+			Logger.log(`[renameTask] Task not found in history: ${taskId}`)
+			throw new Error(`Task not found in history: ${taskId}`)
+		}
+
+		await this.taskHistory.updateTaskHistory({
+			...historyItem,
+			task: nextTitle,
+		})
+		await this.postStateToWebview()
+	}
+
+	async moveTaskToProject(taskId: string, projectPath: string): Promise<void> {
+		await this.taskHistory.moveTaskToProject(taskId, projectPath)
 		await this.postStateToWebview()
 	}
 
@@ -2402,10 +2429,10 @@ export class Controller {
 				}
 			}
 
-			const processedTaskHistory = Array.from(mergedTaskHistoryById.values())
+			const sortedTaskHistory = Array.from(mergedTaskHistoryById.values())
 				.filter((item) => item.ts && item.task)
 				.sort((a, b) => b.ts - a.ts)
-				.slice(0, 100)
+			const processedTaskHistory = sortedTaskHistory.slice(0, 100)
 
 			let queuedPrompts: ExtensionState["queuedPrompts"] = []
 			if (snapshotSession) {
@@ -2438,8 +2465,14 @@ export class Controller {
 			}
 			return {
 				...state,
+				// Resolved against the full list, not the 100-row window sent as
+				// taskHistory: reopening an old conversation (or one whose title was
+				// just changed) must still deliver its record, or the task header falls
+				// back to the original prompt and hides the name the user gave it.
+				// snapshotTask (not this.task) keeps upstream's consistency guarantee:
+				// the id must match the snapshot the rest of this payload was built from.
 				currentTaskItem: snapshotTask?.taskId
-					? processedTaskHistory.find((item) => item.id === snapshotTask.taskId)
+					? sortedTaskHistory.find((item) => item.id === snapshotTask.taskId)
 					: undefined,
 				taskHistory: processedTaskHistory,
 				turnState: this.turnStateTracker.get(),
