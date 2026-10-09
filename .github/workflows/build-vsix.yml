@@ -2,8 +2,9 @@ name: build-vsix
 
 # Lightweight auto-build: produce a downloadable .vsix on every push / PR / manual trigger.
 # Unlike the official ext-vscode-publish.yml (requires manual version input + publish approval),
-# this workflow builds + uploads an artifact AND publishes both files to an evergreen
-# GitHub Release ("patch-latest") so anyone can download without logging in.
+# this workflow builds + uploads an artifact AND publishes both files to a GitHub Release tagged
+# "<base>-patch" (e.g. 4.1.23-patch), derived from apps/vscode/package.json, so anyone can
+# download without logging in. A moving "patch-latest" pointer keeps a stable "newest" URL.
 # Artifacts require a GitHub login; Release assets do not.
 
 on:
@@ -24,6 +25,8 @@ jobs:
   build:
     name: Build VSIX
     runs-on: ubuntu-latest
+    outputs:
+      pkg_version: ${{ steps.version.outputs.pkg_version }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -116,9 +119,8 @@ jobs:
 
   release:
     name: Publish to Release
-    # PR builds from forks have no write permission — build only.
-    # Runs on push + manual dispatch; PR events (incl. same-repo) skip release
-    # so the "patch-latest" Release always points at a pushed branch build.
+    # PR builds (especially from forks) have no write permission — build only.
+    # Runs on push + manual dispatch so every release corresponds to a pushed branch.
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     needs: build
     runs-on: ubuntu-latest
@@ -131,22 +133,55 @@ jobs:
           path: release-assets
           merge-multiple: true
 
-      - name: Publish to evergreen Release
+      # Tag = "<base>-patch" from apps/vscode/package.json, e.g. "4.1.23-patch".
+      # Re-running a build on the same base version updates that release in place
+      # (same-named assets are overwritten); bumping the base version creates a
+      # new tag, so each base version keeps its own page and assets.
+      - name: Publish versioned Release (${{ needs.build.outputs.pkg_version }}-patch)
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: patch-latest
-          name: "Latest patch build"
+          tag_name: ${{ needs.build.outputs.pkg_version }}-patch
+          name: "Cline ${{ needs.build.outputs.pkg_version }} patch"
+          target_commitish: ${{ github.sha }}
           body: |
-            Automated patch build from `${{ github.ref_name }}` @ `${{ github.sha }}`.
+            Automated patch build of Cline, based on v${{ needs.build.outputs.pkg_version }}.
 
-            - VSIX: install with `code --install-extension cline-*-patch.vsix --force`
-            - Source: `git archive` snapshot of the exact built commit.
+            Built from `${{ github.ref_name }}` @ `${{ github.sha }}`.
 
-            This is an unofficial fork build. Do not publish it to the Marketplace
-            under someone else's publisher ID.
+            **Downloads**
+            - `cline-${{ needs.build.outputs.pkg_version }}-patch.vsix` — install with `code --install-extension cline-${{ needs.build.outputs.pkg_version }}-patch.vsix --force`
+            - `cline-${{ needs.build.outputs.pkg_version }}-patch-source.tar.gz` — `git archive` snapshot of the exact built commit
+
+            Unofficial fork build — do not publish it to the Marketplace under
+            someone else's publisher ID.
           files: |
             release-assets/cline-*-patch.vsix
             release-assets/cline-*-patch-source.tar.gz
           prerelease: true
+          make_latest: false
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Stable "newest" URL that always points at the most recent build. Identical
+      # assets to the versioned release above; drop this step if only the
+      # per-version tags are wanted.
+      - name: Move patch-latest pointer
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: patch-latest
+          name: "Latest patch build (always newest)"
+          target_commitish: ${{ github.sha }}
+          body: |
+            Pointer to the newest patch build — currently v${{ needs.build.outputs.pkg_version }}.
+            Versioned release: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ needs.build.outputs.pkg_version }}-patch
+
+            Built from `${{ github.ref_name }}` @ `${{ github.sha }}`.
+          files: |
+            release-assets/cline-*-patch.vsix
+            release-assets/cline-*-patch-source.tar.gz
+          prerelease: true
+          make_latest: false
+          fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
