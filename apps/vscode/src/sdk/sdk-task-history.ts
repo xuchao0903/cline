@@ -10,6 +10,7 @@ import getFolderSize from "get-folder-size"
 import type { McpHub } from "@/services/mcp/McpHub"
 import type { TelemetryService } from "@/services/telemetry/TelemetryService"
 import { Logger } from "@/shared/services/Logger"
+import { isDirectory } from "@/utils/fs"
 import { deleteLegacyTask, readApiConversationHistory, readTaskHistory, readUiMessages, taskDirPath } from "./legacy-state-reader"
 import {
 	appendLegacyResumeWarning,
@@ -19,6 +20,7 @@ import {
 import type { MessageIdMinter } from "./message-id-minter"
 import { sdkMessagesToClineMessages } from "./message-translator"
 import type { SdkSessionLifecycle } from "./sdk-session-lifecycle"
+import { resolveSessionProjectPath, SESSION_PROJECT_PATH_METADATA_KEY } from "./session-project"
 import type { VscodeSessionHost } from "./vscode-session-host"
 
 export interface TaskUsage {
@@ -190,7 +192,7 @@ export function sessionHistoryRecordToHistoryItem(item: SessionHistoryRecord): H
 		isFavorited: metadataBoolean(metadata, "isFavorited") ?? metadataBoolean(metadata, "is_favorited") ?? false,
 		modelId: item.model || metadataString(metadata, "modelId") || "",
 		apiProvider: item.provider || undefined,
-		cwdOnTaskInitialization: item.cwd ?? item.workspaceRoot,
+		cwdOnTaskInitialization: resolveSessionProjectPath(item),
 		isLegacy:
 			metadataBoolean(metadata, "legacyTask") === true || metadataBoolean(metadata, "migratedFromLegacyTask") === true,
 	}
@@ -345,7 +347,7 @@ export class SdkTaskHistory {
 	 */
 	private updateCachedSessionRecord(
 		sessionId: string,
-		updates: { prompt: string; metadata: Record<string, unknown>; updatedAt: string },
+		updates: { prompt?: string; metadata: Record<string, unknown>; updatedAt: string },
 	): void {
 		const cache = this.metadataHistoryCache
 		if (!cache) {
@@ -359,7 +361,9 @@ export class SdkTaskHistory {
 		const existing = cache.records[index]
 		cache.records[index] = {
 			...existing,
-			prompt: updates.prompt,
+			// Prompt is omitted by metadata-only writes (e.g. a project move), which
+			// must leave the recorded first message alone.
+			...(updates.prompt !== undefined ? { prompt: updates.prompt } : {}),
 			metadata: updates.metadata,
 			updatedAt: updates.updatedAt,
 		}
@@ -593,6 +597,57 @@ export class SdkTaskHistory {
 
 	async updateTaskHistoryItem(item: HistoryItem): Promise<void> {
 		await this.updateSession(item.id, item)
+	}
+
+	/**
+	 * Reassigns a conversation to another project folder.
+	 *
+	 * The folder is stored as a metadata override rather than by rewriting the
+	 * session's cwd: the conversation then groups under the new project, is
+	 * picked up by that workspace's "Workspace Only" filter, and resumes there —
+	 * while the cwd it originally ran in is preserved, so dropping it back on
+	 * the original project restores the previous behaviour.
+	 */
+	async moveTaskToProject(taskId: string, projectPath: string): Promise<void> {
+		const target = projectPath.trim()
+		if (!target) {
+			throw new Error("A project folder is required")
+		}
+		if (!(await isDirectory(target))) {
+			throw new Error(`Folder does not exist: ${target}`)
+		}
+
+		const written = await this.withHistoryHost(async (host) => {
+			const existing = (await host.get(taskId)) as SessionHistoryRecord | undefined
+			if (!existing) {
+				return { updated: false, metadata: undefined }
+			}
+			if (resolveSessionProjectPath(existing) === target) {
+				// Already filed under that folder; skip the write so the
+				// conversation keeps its position in recency ordering.
+				return { updated: true, metadata: undefined }
+			}
+			const metadata: Record<string, unknown> = {
+				...(existing.metadata ?? {}),
+				[SESSION_PROJECT_PATH_METADATA_KEY]: target,
+			}
+			const result = await host.update(taskId, { metadata })
+			return { updated: result.updated, metadata }
+		})
+
+		if (!written.updated) {
+			// The session vanished (or a racing writer won the OCC retry loop), so
+			// a cached patch would render a move that never landed.
+			this.invalidateMetadataHistoryCache()
+			throw new Error(`Task not found in history: ${taskId}`)
+		}
+		if (written.metadata) {
+			this.updateCachedSessionRecord(taskId, {
+				metadata: written.metadata,
+				updatedAt: new Date().toISOString(),
+			})
+		}
+		Logger.log(`[SdkTaskHistory] Moved task ${taskId} to project ${target}`)
 	}
 
 	private async deleteSession(sessionId: string): Promise<void> {

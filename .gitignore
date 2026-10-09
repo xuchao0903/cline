@@ -3,6 +3,9 @@ dist
 dist-standalone
 node_modules
 tmp
+# Locally downloaded protoc (Windows): see apps/vscode/scripts/build-proto.mjs,
+# which prefers it over the grpc-tools prebuilt binary. Never committed, never shipped.
+tmp-protoc
 .vscode-test/
 *.vsix
 

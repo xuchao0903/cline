@@ -33,6 +33,10 @@ service TaskService {
   rpc exportTaskWithId(StringRequest) returns (Empty);
   // Toggles the favorite status of a task
   rpc toggleTaskFavorite(TaskFavoriteRequest) returns (Empty);
+  // Renames a task's conversation
+  rpc renameTask(RenameTaskRequest) returns (Empty);
+  // Reassigns a task's conversation to another project folder
+  rpc moveTaskToProject(MoveTaskToProjectRequest) returns (Empty);
   // Gets filtered task history
   rpc getTaskHistory(GetTaskHistoryRequest) returns (TaskHistoryArray);
   // Sends a response to a previous ask operation
@@ -61,6 +65,22 @@ message TaskFavoriteRequest {
   Metadata metadata = 1;
   string task_id = 2;
   bool is_favorited = 3;
+}
+
+// Request message for renaming a task's conversation
+message RenameTaskRequest {
+  Metadata metadata = 1;
+  string task_id = 2;
+  // New conversation title. Must not be blank.
+  string title = 3;
+}
+
+// Request message for reassigning a task's conversation to another project
+message MoveTaskToProjectRequest {
+  Metadata metadata = 1;
+  string task_id = 2;
+  // Absolute path of the project folder the conversation belongs to.
+  string project_path = 3;
 }
 
 // Response for task details
@@ -113,6 +133,9 @@ message TaskItem {
   // Provider id the task ran on. Empty for tasks recorded before this
   // field existed and for legacy imports; consumers show cost in that case.
   string api_provider = 13;
+  // Workspace root (project) the task ran in. Empty for tasks recorded
+  // before this field existed.
+  string workspace_root = 14;
 }
 
 // Request for ask response operation
