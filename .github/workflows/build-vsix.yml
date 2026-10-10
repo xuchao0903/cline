@@ -1,0 +1,145 @@
+name: build-vsix
+
+# Lightweight auto-build: produce a downloadable .vsix on every push / PR / manual trigger.
+# Unlike the official ext-vscode-publish.yml (requires manual version input + publish approval),
+# this workflow builds + uploads an artifact AND publishes both files to a GitHub Release tagged
+# "<base>-patch" (e.g. 4.1.23-patch), derived from apps/vscode/package.json, so anyone can
+# download without logging in. Artifacts require a GitHub login; Release assets do not.
+
+on:
+  push:
+    branches:
+      - main
+      - "feat/**"
+      - "fix/**"
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build VSIX
+    runs-on: ubuntu-latest
+    outputs:
+      pkg_version: ${{ steps.version.outputs.pkg_version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.2"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install workspace dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build SDK packages
+        run: bun run build:sdk
+
+      - name: Resolve version
+        id: version
+        run: |
+          PKG_VERSION=$(node -p "require('./apps/vscode/package.json').version")
+          echo "pkg_version=${PKG_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "vsix_name=cline-${PKG_VERSION}-patch.vsix" >> "$GITHUB_OUTPUT"
+          echo "Building cline ${PKG_VERSION} patch"
+
+      - name: Build and package VSIX
+        working-directory: apps/vscode
+        env:
+          CLINE_ENVIRONMENT: production
+        run: |
+          npm install -g @vscode/vsce
+
+          # vsce reads README.md from the extension root for the Marketplace page.
+          # The repo default is the GitHub-flavored README, so swap in the
+          # marketplace one for packaging and restore it afterwards.
+          node scripts/marketplace-readme.mjs swap-in
+          trap 'node scripts/marketplace-readme.mjs restore' EXIT
+
+          # --no-dependencies: the extension is fully esbuild-bundled, and
+          # under the bun workspace the @cline/* deps are symlinks pointing
+          # outside the package, so without this flag vsce would pull the
+          # whole monorepo into the .vsix.
+          vsce package --no-dependencies --out "${{ steps.version.outputs.vsix_name }}"
+
+      - name: Verify VSIX
+        working-directory: apps/vscode
+        run: |
+          ls -lh "${{ steps.version.outputs.vsix_name }}"
+          # Unpack and verify the packaged manifest identity (publisher/name/version).
+          rm -rf /tmp/vsix-verify && mkdir -p /tmp/vsix-verify
+          unzip -q "${{ steps.version.outputs.vsix_name }}" extension/package.json -d /tmp/vsix-verify
+          node -e '
+            const pkg = require("/tmp/vsix-verify/extension/package.json");
+            console.log(`identity: ${pkg.publisher}.${pkg.name}@${pkg.version}`);
+            if (pkg.name !== "claude-dev" || pkg.publisher !== "saoudrizwan") {
+              console.error("unexpected extension identity");
+              process.exit(1);
+            }
+          '
+
+      - name: Upload VSIX artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.version.outputs.vsix_name }}
+          path: apps/vscode/${{ steps.version.outputs.vsix_name }}
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: Publish to Release
+    # PR builds (especially from forks) have no write permission — build only.
+    # Runs on push + manual dispatch so every release corresponds to a pushed branch.
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download build outputs
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      # Tag = "<base>-patch" from apps/vscode/package.json, e.g. "4.1.23-patch".
+      # Re-running a build on the same base version updates that release in place
+      # (same-named assets are overwritten); bumping the base version creates a
+      # new tag, so each base version keeps its own page and assets.
+      - name: Publish versioned Release (${{ needs.build.outputs.pkg_version }}-patch)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.build.outputs.pkg_version }}-patch
+          name: "Cline ${{ needs.build.outputs.pkg_version }} patch"
+          target_commitish: ${{ github.sha }}
+          body: |
+            Automated patch build of Cline, based on v${{ needs.build.outputs.pkg_version }}.
+
+            Built from `${{ github.ref_name }}` @ `${{ github.sha }}`.
+
+            **Downloads**
+            - `cline-${{ needs.build.outputs.pkg_version }}-patch.vsix` — install with `code --install-extension cline-${{ needs.build.outputs.pkg_version }}-patch.vsix --force`
+
+            Source code for this build is available via the automatic
+            `source.zip` / `source.tar.gz` assets GitHub attaches to every release.
+
+            Unofficial fork build — do not publish it to the Marketplace under
+            someone else's publisher ID.
+          files: |
+            release-assets/cline-*-patch.vsix
+          prerelease: true
+          make_latest: false
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
